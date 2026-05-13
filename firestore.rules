@@ -1,0 +1,46 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isSignedIn() { return request.auth != null; }
+
+    function isValidProject(data) {
+      return data.keys().hasAll(['title', 'ownerId', 'createdAt', 'updatedAt']) &&
+             data.keys().size() >= 4 &&
+             data.title is string && data.title.size() <= 100 &&
+             data.ownerId == request.auth.uid &&
+             (data.get('placeholderBg', '') is string) &&
+             (data.get('published', false) is bool) &&
+             data.createdAt is timestamp &&
+             data.updatedAt is timestamp;
+    }
+
+    match /projects/{projectId} {
+      allow get: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+      
+      // Allow create if auth matches, ownerId matches, and valid project
+      allow create: if isSignedIn() && 
+                    isValidId(projectId) && 
+                    isValidProject(incoming()) && 
+                    incoming().createdAt == request.time && 
+                    incoming().updatedAt == request.time;
+      
+      // Allow update if owner, incoming matches owner, update keys are safe
+      allow update: if isSignedIn() && 
+                    existing().ownerId == request.auth.uid && 
+                    isValidProject(incoming()) && 
+                    incoming().ownerId == existing().ownerId &&
+                    incoming().createdAt == existing().createdAt &&
+                    incoming().updatedAt == request.time;
+      
+      allow delete: if isSignedIn() && existing().ownerId == request.auth.uid;
+    }
+  }
+}
