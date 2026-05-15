@@ -11,17 +11,17 @@ export default function GlobalSidebar({ isOpen, onClose, setView }: { isOpen: bo
 
   return (
     <>
-      <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 9999 }} onClick={onClose} />
-      <div className="db-sidebar" style={{ position: 'fixed', top: 0, left: 0, bottom: 0, zIndex: 10000, width: '256px', background: '#18181b', borderRight: '1px solid #27272a', display: 'flex', flexDirection: 'column' }}>
+      <div className="gs-overlay" onClick={onClose} />
+      <div className="db-sidebar gs-drawer">
         
         {/* Workspace Dropdown */}
-        <div style={{ padding: '16px' }}>
-          <div className="db-ws-dropdown" style={{ margin: 0, width: '100%' }} onClick={() => setDropdownOpen(!dropdownOpen)}>
+        <div className="gs-ws-container">
+          <div className="db-ws-dropdown gs-dropdown" onClick={() => setDropdownOpen(!dropdownOpen)}>
             <div className="db-ws-left">
               {user && user.photoURL ? (
                 <img src={user.photoURL} alt="Avatar" className="db-ws-avatar" />
               ) : (
-                <div className="db-ws-avatar" style={{ background: '#2563eb' }}>
+                <div className="db-ws-avatar gs-avatar-fallback">
                   {user?.email?.[0].toUpperCase() || 'A'}
                 </div>
               )}
@@ -33,7 +33,7 @@ export default function GlobalSidebar({ isOpen, onClose, setView }: { isOpen: bo
           </div>
         </div>
 
-        <div className="db-sidebar-scroll" style={{ flex: 1, overflowY: 'auto' }}>
+        <div className="db-sidebar-scroll gs-scroll">
           <div className="db-nav-group">
             <div className="db-nav-item" onClick={() => { setView('dashboard'); onClose(); }}>
               <svg className="db-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><polyline points="9 22 9 12 15 12 15 22" /></svg>
@@ -54,7 +54,7 @@ export default function GlobalSidebar({ isOpen, onClose, setView }: { isOpen: bo
             </div>
           </div>
 
-          <div className="db-sidebar-section-title" style={{ marginTop: '24px', fontSize: '11px', fontWeight: 600, color: '#71717a', padding: '0 12px', marginBottom: '8px' }}>
+          <div className="db-sidebar-section-title gs-section-title">
              Projects
           </div>
           <div className="db-nav-item" onClick={() => { setView('dashboard'); onClose(); }}>

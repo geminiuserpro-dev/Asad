@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
 import { useAuth } from '../contexts/AuthContext';
 import { db } from '../lib/firebase';
 import { collection, query, where, getDocs, addDoc, serverTimestamp, doc, updateDoc, deleteDoc } from 'firebase/firestore';
@@ -45,11 +46,19 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
 export default function Dashboard({ setView }: { setView: (v: string) => void }) {
   const { user, logout } = useAuth();
   const [cmdOpen, setCmdOpen] = useState(false);
-  const [activeSearchItem, setActiveSearchItem] = useState('My Daily Tasks (80)');
+  const [activeSearchItem, setActiveSearchItem] = useState('');
+  const [cmdSearchQuery, setCmdSearchQuery] = useState('');
+  const [sortOrder, setSortOrder] = useState<'updated_desc' | 'created_desc' | 'title_asc'>('updated_desc');
+  const [sortDropdownOpen, setSortDropdownOpen] = useState(false);
   const [wsDropdownOpen, setWsDropdownOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeNav, setActiveNav] = useState('home');
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    const saved = localStorage.getItem('isDarkMode');
+    if (saved !== null) return saved === 'true';
+    return !document.body.classList.contains('light-mode');
+  });
   const dropdownRef = useRef<HTMLDivElement>(null);
   const [contextMenuProject, setContextMenuProject] = useState<string | null>(null);
   const [contextMenuPos, setContextMenuPos] = useState({ x: 0, y: 0 });
@@ -57,10 +66,21 @@ export default function Dashboard({ setView }: { setView: (v: string) => void })
   
   const [firebaseProjects, setFirebaseProjects] = useState<any[]>([]);
   const [promptText, setPromptText] = useState('');
+  const [isGenerating, setIsGenerating] = useState(false);
   const [renameProjectTarget, setRenameProjectTarget] = useState<{ id: string, name: string } | null>(null);
+  const [projectDetailsTarget, setProjectDetailsTarget] = useState<any | null>(null);
   const [previewTemplate, setPreviewTemplate] = useState<string | null>(null);
   const [renameInput, setRenameInput] = useState('');
   
+  useEffect(() => {
+    localStorage.setItem('isDarkMode', String(isDarkMode));
+    if (isDarkMode) {
+      document.body.classList.remove('light-mode');
+    } else {
+      document.body.classList.add('light-mode');
+    }
+  }, [isDarkMode]);
+
   useEffect(() => {
     if (!user) return;
     const fetchProjects = async () => {
@@ -108,12 +128,31 @@ export default function Dashboard({ setView }: { setView: (v: string) => void })
   ];
 
   const handleCreateProject = async () => {
-    if (!user || !promptText.trim()) return;
+    if (!user || !promptText.trim() || isGenerating) return;
+    setIsGenerating(true);
     try {
+      let title = promptText;
+      let placeholderBg = '#1e3a8a';
+      
+      try {
+        const response = await fetch('/api/generate-project', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ promptText }),
+        });
+        if (response.ok) {
+          const parsed = await response.json();
+          if (parsed.title) title = parsed.title;
+          if (parsed.placeholderBg) placeholderBg = parsed.placeholderBg;
+        }
+      } catch (err) {
+        console.error('AI generation failed, using defaults.', err);
+      }
+
       const newDoc = {
-        title: promptText,
+        title,
         ownerId: user.uid,
-        placeholderBg: '#1e3a8a',
+        placeholderBg,
         published: false,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
@@ -123,6 +162,8 @@ export default function Dashboard({ setView }: { setView: (v: string) => void })
       setFirebaseProjects(prev => [{ id: docRef.id, ...newDoc, createdAt: { toMillis: () => Date.now() }, updatedAt: { toMillis: () => Date.now() } }, ...prev]);
     } catch (err) {
       handleFirestoreError(err, OperationType.CREATE, 'projects', user);
+    } finally {
+      setIsGenerating(false);
     }
   };
 
@@ -134,6 +175,29 @@ export default function Dashboard({ setView }: { setView: (v: string) => void })
       setContextMenuProject(null);
     } catch (err) {
       handleFirestoreError(err, OperationType.DELETE, 'projects', user);
+    }
+  };
+
+  const handleDuplicateProject = async (projectId: string) => {
+    if (!user) return;
+    try {
+      const projToDuplicate = firebaseProjects.find(p => p.id === projectId);
+      if (!projToDuplicate) return;
+      
+      const { id, ...data } = projToDuplicate;
+      
+      const newTitle = `${data.title} (Copy)`;
+      const docRef = await addDoc(collection(db, 'projects'), {
+        ...data,
+        title: newTitle,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      
+      setFirebaseProjects([{ ...data, id: docRef.id, title: newTitle }, ...firebaseProjects]);
+      setContextMenuProject(null);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.CREATE, 'projects', user);
     }
   };
 
@@ -167,6 +231,35 @@ export default function Dashboard({ setView }: { setView: (v: string) => void })
     }
   };
 
+  const filteredProjects = firebaseProjects.filter(p => !cmdSearchQuery || (p.title && p.title.toLowerCase().includes(cmdSearchQuery.toLowerCase())));
+  const activeProj = filteredProjects.find(p => p.id === activeSearchItem) || filteredProjects[0];
+
+  const getSortedProjects = (projects: any[]) => {
+    return [...projects].sort((a, b) => {
+      if (sortOrder === 'updated_desc') {
+        const tA = a.updatedAt?.toMillis() || 0;
+        const tB = b.updatedAt?.toMillis() || 0;
+        return tB - tA;
+      } else if (sortOrder === 'created_desc') {
+        const tA = a.createdAt?.toMillis() || 0;
+        const tB = b.createdAt?.toMillis() || 0;
+        return tB - tA;
+      } else if (sortOrder === 'title_asc') {
+        const tA = (a.title || '').toLowerCase();
+        const tB = (b.title || '').toLowerCase();
+        return tA.localeCompare(tB);
+      }
+      return 0;
+    });
+  };
+
+  useEffect(() => {
+    if (cmdOpen) {
+      setCmdSearchQuery('');
+      setActiveSearchItem('');
+    }
+  }, [cmdOpen]);
+
   // Toggle search modal with Ctrl+K
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -178,16 +271,47 @@ export default function Dashboard({ setView }: { setView: (v: string) => void })
         if (cmdOpen) setCmdOpen(false);
         if (wsDropdownOpen) setWsDropdownOpen(false);
       }
+
+      if (cmdOpen) {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          const items = [...filteredProjects, { id: 'navigate_dashboard' }, { id: 'navigate_new' }];
+          const currentIdx = items.findIndex(item => item.id === (activeSearchItem || activeProj?.id || 'navigate_dashboard'));
+          let nextIdx = e.key === 'ArrowDown' ? currentIdx + 1 : currentIdx - 1;
+          if (nextIdx < 0) nextIdx = items.length - 1;
+          if (nextIdx >= items.length) nextIdx = 0;
+          setActiveSearchItem(items[nextIdx]?.id || '');
+        } else if (e.key === 'Enter') {
+          e.preventDefault();
+          const currentId = activeSearchItem || activeProj?.id;
+          if (currentId === 'navigate_dashboard') {
+            setActiveNav('home');
+            setCmdOpen(false);
+          } else if (currentId === 'navigate_new') {
+            setPromptText('');
+            setView('editor');
+            setCmdOpen(false);
+          } else if (currentId) {
+            setProjectDetailsTarget(filteredProjects.find(p => p.id === currentId));
+            setCmdOpen(false);
+          }
+        }
+      }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [cmdOpen, wsDropdownOpen]);
+  }, [cmdOpen, wsDropdownOpen, filteredProjects, activeProj, activeSearchItem]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setWsDropdownOpen(false);
       }
+      
+      if (!(event.target as Element).closest('.db-sort-dropdown') && !(event.target as Element).closest('.db-view-filter-sort')) {
+        setSortDropdownOpen(false);
+      }
+      
       // Click outside for context menu
       if (!(event.target as Element).closest('.db-project-context-menu') && !(event.target as Element).closest('.db-project-more')) {
         setContextMenuProject(null);
@@ -301,78 +425,138 @@ export default function Dashboard({ setView }: { setView: (v: string) => void })
         </div>
       </div>
 
+      {/* Project Details Modal */}
+      <div className={`cmd-modal ${projectDetailsTarget ? 'active' : ''}`} onClick={() => setProjectDetailsTarget(null)}>
+        <div className="cmd-box" onClick={e => e.stopPropagation()} style={{ padding: '24px', maxWidth: '400px' }}>
+          <h2 style={{ fontSize: '18px', fontWeight: 600, margin: '0 0 16px 0', color: '#fff' }}>Project Details</h2>
+          {projectDetailsTarget && (
+            <div style={{ marginBottom: '24px', color: '#e5e5e5', fontSize: '14px' }}>
+              <p style={{ margin: '0 0 8px 0' }}><span style={{ color: '#a1a1aa' }}>ID:</span> {projectDetailsTarget.id}</p>
+              <p style={{ margin: '0 0 8px 0' }}><span style={{ color: '#a1a1aa' }}>Name:</span> {projectDetailsTarget.title}</p>
+              <p style={{ margin: '0 0 8px 0' }}><span style={{ color: '#a1a1aa' }}>Starred:</span> {projectDetailsTarget.starred ? 'Yes' : 'No'}</p>
+              <p style={{ margin: '0 0 8px 0' }}><span style={{ color: '#a1a1aa' }}>Created At:</span> {projectDetailsTarget.createdAt ? new Date(projectDetailsTarget.createdAt.toMillis()).toLocaleString() : 'Unknown'}</p>
+              <p style={{ margin: '0 0 8px 0' }}><span style={{ color: '#a1a1aa' }}>Updated At:</span> {projectDetailsTarget.updatedAt ? new Date(projectDetailsTarget.updatedAt.toMillis()).toLocaleString() : 'Unknown'}</p>
+            </div>
+          )}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+            <button onClick={() => setProjectDetailsTarget(null)} style={{ padding: '8px 16px', borderRadius: '6px', fontSize: '13px', background: '#ea580c', border: 'none', color: '#fff', cursor: 'pointer' }}>Close</button>
+          </div>
+        </div>
+      </div>
+
       <div className={`cmd-modal ${cmdOpen ? 'active' : ''}`} onClick={() => setCmdOpen(false)}>
         <div className="cmd-box" onClick={e => e.stopPropagation()}>
           <div className="cmd-input-wrap">
-            <input type="text" className="cmd-input" placeholder="Search..." autoFocus />
+            <input 
+              type="text" 
+              className="cmd-input" 
+              placeholder="Search..." 
+              autoFocus 
+              value={cmdSearchQuery}
+              onChange={(e) => setCmdSearchQuery(e.target.value)}
+            />
           </div>
           <div className="cmd-body">
             <div className="cmd-left">
-              <div className="cmd-group-title">Recent projects</div>
-              <div className="cmd-item active" onClick={() => setActiveSearchItem('My Daily Tasks (80)')}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
-                My Daily Tasks (80)
-              </div>
-              <div className="cmd-item" onClick={() => setActiveSearchItem('Pixel Perfect Clone')}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
-                Pixel Perfect Clone
-              </div>
-              <div className="cmd-item" onClick={() => setActiveSearchItem('Remix of Lovable slides (00)')}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
-                Remix of Lovable slides (00)
-              </div>
-              <div className="cmd-item">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
-                Your Personal Hub
-              </div>
+              <div className="cmd-group-title">Projects</div>
+              {filteredProjects.length === 0 ? (
+                <div style={{ padding: '8px 16px', fontSize: '13px', color: '#a1a1aa' }}>No projects found.</div>
+              ) : (
+                filteredProjects.map((proj: any) => (
+                  <div 
+                    key={proj.id} 
+                    className={`cmd-item ${(activeSearchItem || activeProj?.id) === proj.id ? 'active' : ''}`} 
+                    onClick={() => { setProjectDetailsTarget(proj); setCmdOpen(false); }}
+                    onMouseEnter={() => setActiveSearchItem(proj.id)}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0 }}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
+                    <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{proj.title}</span>
+                  </div>
+                ))
+              )}
               
               <div className="cmd-group-title">Navigate to</div>
-              <div className="cmd-item">
+              <div 
+                className={`cmd-item ${(activeSearchItem || activeProj?.id) === 'navigate_dashboard' ? 'active' : ''}`} 
+                onClick={() => { setActiveNav('home'); setCmdOpen(false); }}
+                onMouseEnter={() => setActiveSearchItem('navigate_dashboard')}
+              >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><line x1="3" y1="9" x2="21" y2="9" /><line x1="9" y1="21" x2="9" y2="9" /></svg>
                 Dashboard
               </div>
-              <div className="cmd-item">
+              <div 
+                className={`cmd-item ${(activeSearchItem || activeProj?.id) === 'navigate_new' ? 'active' : ''}`} 
+                onClick={() => { setPromptText(''); setView('editor'); setCmdOpen(false); }}
+                onMouseEnter={() => setActiveSearchItem('navigate_new')}
+              >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
                 Create new project
               </div>
             </div>
             
             <div className="cmd-right">
-              {activeSearchItem === 'My Daily Tasks (80)' && (
+              {activeSearchItem === 'navigate_dashboard' ? (
                 <>
-                  <div className="cmd-preview-thumb" style={{ background: '#fff' }}>
-                    <div style={{ color: '#000', textAlign: 'center' }}>
-                      <div style={{ fontSize: '16px', fontWeight: 600, marginBottom: '8px' }}>Today.</div>
-                      <div style={{ fontSize: '12px' }}>What needs to happen?</div>
+                  <div className="cmd-preview-thumb" style={{ background: '#f4f4f5' }}>
+                    <div style={{ color: '#09090b', textAlign: 'center', padding: '20px' }}>
+                      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><line x1="3" y1="9" x2="21" y2="9" /><line x1="9" y1="21" x2="9" y2="9" /></svg>
                     </div>
                   </div>
                   <div className="cmd-preview-details">
-                    <div className="cmd-preview-title">My Daily Tasks (80)</div>
+                    <div className="cmd-preview-title">Dashboard</div>
+                    <div className="cmd-meta-grid">
+                      <p style={{ color: '#a1a1aa', fontSize: '13px' }}>Return to your dashboard to view all projects and manage settings.</p>
+                    </div>
+                  </div>
+                </>
+              ) : activeSearchItem === 'navigate_new' ? (
+                <>
+                  <div className="cmd-preview-thumb" style={{ background: '#e0e7ff' }}>
+                    <div style={{ color: '#3730a3', textAlign: 'center', padding: '20px' }}>
+                      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+                    </div>
+                  </div>
+                  <div className="cmd-preview-details">
+                    <div className="cmd-preview-title">Create new project</div>
+                    <div className="cmd-meta-grid">
+                      <p style={{ color: '#a1a1aa', fontSize: '13px' }}>Start a fresh project from scratch.</p>
+                    </div>
+                  </div>
+                </>
+              ) : activeProj ? (
+                <>
+                  <div className="cmd-preview-thumb" style={{ background: activeProj.placeholderBg || '#1e3a8a' }}>
+                    <div style={{ color: '#fff', textAlign: 'center', padding: '20px' }}>
+                      <div style={{ fontSize: '18px', fontWeight: 'bold' }}>{activeProj.title}</div>
+                    </div>
+                  </div>
+                  <div className="cmd-preview-details">
+                    <div className="cmd-preview-title">{activeProj.title}</div>
                     <div className="cmd-meta-grid">
                       <div className="cmd-meta-group">
                         <div className="cmd-meta-label">Created by</div>
-                        <div className="cmd-meta-value">Asad Ali</div>
+                        <div className="cmd-meta-value">{activeProj.ownerId === user?.uid ? 'Me' : 'Someone Else'}</div>
                       </div>
                       <div className="cmd-meta-group">
                         <div className="cmd-meta-label">Status</div>
-                        <div className="cmd-meta-value">Published</div>
+                        <div className="cmd-meta-value">{activeProj.published ? 'Published' : 'Draft'}</div>
                       </div>
                       <div className="cmd-meta-group">
                         <div className="cmd-meta-label">Created</div>
-                        <div className="cmd-meta-value">2 days ago</div>
+                        <div className="cmd-meta-value">{activeProj.createdAt ? new Date(activeProj.createdAt.toMillis()).toLocaleDateString() : 'Unknown'}</div>
                       </div>
                       <div className="cmd-meta-group">
                         <div className="cmd-meta-label">Last edited</div>
-                        <div className="cmd-meta-value">1 day ago</div>
+                        <div className="cmd-meta-value">{activeProj.updatedAt ? new Date(activeProj.updatedAt.toMillis()).toLocaleDateString() : 'Unknown'}</div>
                       </div>
                       <div className="cmd-meta-group">
-                        <div className="cmd-meta-label">Last opened</div>
-                        <div className="cmd-meta-value">19 hours ago</div>
+                        <div className="cmd-meta-label">Starred</div>
+                        <div className="cmd-meta-value">{activeProj.starred ? 'Yes' : 'No'}</div>
                       </div>
                     </div>
                   </div>
                 </>
-              )}
+              ) : null}
             </div>
           </div>
           <div className="cmd-footer">
@@ -597,12 +781,26 @@ export default function Dashboard({ setView }: { setView: (v: string) => void })
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
               Rename
             </div>
+            <div className="db-project-context-item" onClick={() => {
+              if (contextMenuProject) handleDuplicateProject(contextMenuProject);
+            }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              Duplicate
+            </div>
+            <div className="db-project-context-item" onClick={() => {
+              const proj = firebaseProjects.find(p => p.id === contextMenuProject);
+              setProjectDetailsTarget(proj || null);
+              setContextMenuProject(null);
+            }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+              View Details
+            </div>
             <div className="db-project-context-item" onClick={() => { setSettingsOpen(true); setContextMenuProject(null); }}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
               Settings
             </div>
             <div className="db-project-context-item danger" onClick={() => handleDeleteProject(contextMenuProject)}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+              <svg style={{ backgroundColor: '#dc2121' }} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
               Delete
             </div>
           </div>
@@ -657,6 +855,46 @@ export default function Dashboard({ setView }: { setView: (v: string) => void })
       </div>
 
       <div className="db-main">
+        <div className="db-top-nav" style={{ position: 'absolute', top: 0, right: 0, padding: '16px 32px', zIndex: 50, display: 'flex', alignItems: 'center' }}>
+          <button 
+            onClick={() => setIsDarkMode(!isDarkMode)}
+            style={{ 
+              background: 'transparent', border: '1px solid #3f3f46', borderRadius: '8px', padding: '8px', 
+              color: isDarkMode ? '#e4e4e7' : '#09090b', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px',
+              transition: 'background-color 0.2s, color 0.2s',
+              backgroundColor: isDarkMode ? 'transparent' : '#e5e5e5'
+            }}
+          >
+            <div style={{ position: 'relative', width: 16, height: 16, overflow: 'hidden' }}>
+              <AnimatePresence mode="wait" initial={false}>
+                {isDarkMode ? (
+                  <motion.div
+                    key="dark"
+                    initial={{ y: -20, opacity: 0, rotate: -90 }}
+                    animate={{ y: 0, opacity: 1, rotate: 0 }}
+                    exit={{ y: 20, opacity: 0, rotate: 90 }}
+                    transition={{ duration: 0.2 }}
+                    style={{ position: 'absolute', inset: 0 }}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+                  </motion.div>
+                ) : (
+                  <motion.div
+                    key="light"
+                    initial={{ y: 20, opacity: 0, rotate: 90 }}
+                    animate={{ y: 0, opacity: 1, rotate: 0 }}
+                    exit={{ y: -20, opacity: 0, rotate: -90 }}
+                    transition={{ duration: 0.2 }}
+                    style={{ position: 'absolute', inset: 0 }}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+            <span style={{ fontSize: '13px', fontWeight: 500 }}>{isDarkMode ? 'Dark' : 'Light'}</span>
+          </button>
+        </div>
         <div className="db-mesh-bg"></div>
         <div className="db-content-scroll">
           {activeNav === 'home' ? (
@@ -675,7 +913,19 @@ export default function Dashboard({ setView }: { setView: (v: string) => void })
                 
                 <div className="db-prompt-bar-wrap">
                   <div className="db-prompt-input-row">
-                    <textarea className="db-prompt-input" placeholder="Ask Lovable to create a dashboard to..." rows={1} value={promptText} onChange={(e) => setPromptText(e.target.value)} />
+                    <textarea 
+                      className="db-prompt-input" 
+                      placeholder="Ask Lovable to create a dashboard to..." 
+                      rows={1} 
+                      value={promptText} 
+                      onChange={(e) => setPromptText(e.target.value)} 
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          handleCreateProject();
+                        }
+                      }}
+                    />
                     <div className="db-prompt-input-icon">
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
                     </div>
@@ -692,8 +942,12 @@ export default function Dashboard({ setView }: { setView: (v: string) => void })
                       <button className="db-prompt-tool-btn">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /><line x1="8" y1="23" x2="16" y2="23" /></svg>
                       </button>
-                      <button className="db-build-btn" onClick={handleCreateProject}>
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" /></svg>
+                      <button className="db-build-btn" onClick={handleCreateProject} disabled={isGenerating} style={{ opacity: isGenerating ? 0.7 : 1 }}>
+                        {isGenerating ? (
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                        ) : (
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="19" x2="12" y2="5" /><polyline points="5 12 12 5 19 12" /></svg>
+                        )}
                       </button>
                     </div>
                   </div>
@@ -709,10 +963,27 @@ export default function Dashboard({ setView }: { setView: (v: string) => void })
                     <button className={`db-tab ${dashboardTab === 'shared_with_me' ? 'active' : ''}`} onClick={() => setDashboardTab('shared_with_me')}>Shared with me</button>
                     <button className={`db-tab ${dashboardTab === 'lovable_templates' ? 'active' : ''}`} onClick={() => setDashboardTab('lovable_templates')}>Lovable templates</button>
                   </div>
-                  <button className="db-browse-all">
-                    Browse all
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg>
-                  </button>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    {dashboardTab !== 'lovable_templates' && (
+                      <div style={{ position: 'relative' }}>
+                        <button className="db-view-filter db-view-filter-sort" onClick={(e) => { e.stopPropagation(); setSortDropdownOpen(!sortDropdownOpen); }}>
+                          {sortOrder === 'updated_desc' ? 'Last edited' : sortOrder === 'created_desc' ? 'Creation date' : 'Title'} 
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                        </button>
+                        {sortDropdownOpen && (
+                          <div className="db-project-context-menu db-sort-dropdown" style={{ top: '100%', right: 0, marginTop: '4px', zIndex: 100, minWidth: '140px' }}>
+                            <div className="db-project-context-item" onClick={() => { setSortOrder('updated_desc'); setSortDropdownOpen(false); }}>Last edited</div>
+                            <div className="db-project-context-item" onClick={() => { setSortOrder('created_desc'); setSortDropdownOpen(false); }}>Creation date</div>
+                            <div className="db-project-context-item" onClick={() => { setSortOrder('title_asc'); setSortDropdownOpen(false); }}>Title</div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <button className="db-browse-all">
+                      Browse all
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg>
+                    </button>
+                  </div>
                 </div>
 
                 <div className="db-grid">
@@ -733,7 +1004,14 @@ export default function Dashboard({ setView }: { setView: (v: string) => void })
                       </div>
                     ))
                   ) : (
-                    firebaseProjects.map((p, i) => (
+                    getSortedProjects(firebaseProjects
+                      .filter(p => {
+                        if (dashboardTab === 'starred') return p.starred;
+                        if (dashboardTab === 'my_projects') return p.ownerId === user?.uid;
+                        if (dashboardTab === 'shared_with_me') return p.ownerId !== user?.uid;
+                        return true;
+                      }))
+                      .map((p, i) => (
                       <div key={p.id} className="db-card" onClick={() => setView('editor')}>
                         <div className="db-card-thumb-wrap">
                           <div className="db-card-placeholder" style={{ background: p.placeholderBg }}>
@@ -781,7 +1059,19 @@ export default function Dashboard({ setView }: { setView: (v: string) => void })
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
                   <input type="text" className="db-view-search" placeholder={`Search ${activeNav.replace(/_/g, ' ')}...`} />
                 </div>
-                <button className="db-view-filter">Last edited <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
+                <div style={{ position: 'relative' }}>
+                  <button className="db-view-filter db-view-filter-sort" onClick={(e) => { e.stopPropagation(); setSortDropdownOpen(!sortDropdownOpen); }}>
+                    {sortOrder === 'updated_desc' ? 'Last edited' : sortOrder === 'created_desc' ? 'Creation date' : 'Title'} 
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                  </button>
+                  {sortDropdownOpen && (
+                    <div className="db-project-context-menu db-sort-dropdown" style={{ top: '100%', left: 0, marginTop: '4px', zIndex: 100 }}>
+                      <div className="db-project-context-item" onClick={() => { setSortOrder('updated_desc'); setSortDropdownOpen(false); }}>Last edited</div>
+                      <div className="db-project-context-item" onClick={() => { setSortOrder('created_desc'); setSortDropdownOpen(false); }}>Creation date</div>
+                      <div className="db-project-context-item" onClick={() => { setSortOrder('title_asc'); setSortDropdownOpen(false); }}>Title</div>
+                    </div>
+                  )}
+                </div>
                 <button className="db-view-filter">Any visibility <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
                 <button className="db-view-filter">Any status <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
                 <button className="db-view-filter">All creators <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
@@ -808,7 +1098,7 @@ export default function Dashboard({ setView }: { setView: (v: string) => void })
                 <div className="db-empty-state">
                   <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor" color="#52525b" opacity="0.6">
                     {activeNav === 'starred' ? (
-                      <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
+                      <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>
                     ) : (
                       <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm1 14h-2v-2h2zm0-4h-2V7h2z"/>
                     )}
@@ -817,21 +1107,32 @@ export default function Dashboard({ setView }: { setView: (v: string) => void })
                     {activeNav === 'starred' ? 'Star projects to access them quickly from any workspace' : 'No projects found here'}
                   </h3>
                   <button className="db-empty-btn" onClick={() => setActiveNav('home')}>Browse projects</button>
-                  <div className="db-empty-img">
-                    <div className="db-empty-img-glass">
-                      <div className="db-empty-img-content">lovable / attach / workspace</div>
+                  <div className="db-empty-img-container">
+                    <div className="db-empty-card db-empty-card-bot"></div>
+                    <div className="db-empty-card db-empty-card-mid"></div>
+                    <div className="db-empty-card db-empty-card-top">
+                      <div className="db-empty-prompt">
+                        <span style={{ fontSize: '12px', color: '#fff', opacity: 0.9 }}>Ask Lovable to...</span>
+                        <div style={{ display: 'flex', gap: '8px', color: '#fff', opacity: 0.6, marginTop: '8px' }}>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v8"/><path d="M8 12h8"/></svg>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                          <span style={{ fontSize: '10px' }}>Attach</span>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+                          <span style={{ fontSize: '10px' }}>Workspaces</span>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
               ) : (
                 <div className="db-grid" style={{ marginTop: '0' }}>
-                  {firebaseProjects
+                  {getSortedProjects(firebaseProjects
                     .filter(p => {
                       if (activeNav === 'starred') return p.starred;
                       if (activeNav === 'created_by_me') return p.ownerId === user?.uid;
                       if (activeNav === 'shared_with_me') return p.ownerId !== user?.uid;
                       return true;
-                    })
+                    }))
                     .map((p, i) => (
                     <div key={p.id} className="db-card" onClick={() => setView('editor')}>
                       <div className="db-card-thumb-wrap">
