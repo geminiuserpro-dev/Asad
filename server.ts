@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
+import "dotenv/config";
 
 async function startServer() {
   const app = express();
@@ -17,11 +18,20 @@ async function startServer() {
         return res.status(400).json({ error: "Missing promptText" });
       }
 
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const ai = new GoogleGenAI({ 
+        apiKey: process.env.GEMINI_API_KEY,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
+        }
+      });
+
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3-flash-preview',
         contents: `Create a very short title (max 5 words) and suggest a dark hex color code that fits the mood of this project description. Output valid JSON only with 'title' and 'placeholderBg' keys. Description: ${promptText}`,
       });
+
       const text = response.text || '';
       const match = text.match(/\{[\s\S]*\}/);
       if (match) {
@@ -30,8 +40,9 @@ async function startServer() {
       } else {
         res.status(500).json({ error: "Invalid response from AI" });
       }
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      console.error("AI generation error:", err);
+      // Return a safer error message to the client
       res.status(500).json({ error: "Failed to generate AI data" });
     }
   });
